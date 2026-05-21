@@ -36,6 +36,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     await initMonaco();
+    await ensureFolderDiffEditor();
     bindSingleCompareUI();
     refreshSingleDiffState();
     document.getElementById("editorLoadNotice").textContent = "에디터 준비 완료";
@@ -1051,6 +1052,7 @@ async function ensureFolderDiffEditor() {
     original: state.folderLeftModel,
     modified: state.folderRightModel
   });
+  state.folderDiffEditor.layout();
 }
 
 function resetFolderDiffViewerState() {
