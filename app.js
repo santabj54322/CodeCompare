@@ -179,6 +179,8 @@ async function initMonaco() {
   state.rightEditor.onDidChangeCursorPosition((e) => {
     syncActiveDiffFromEditor("right", e.position.lineNumber);
   });
+
+  loadFolderComparePayloadIfPresent();
 }
 
 /* ------------------------------
@@ -846,12 +848,64 @@ function bindFolderCompare() {
 
   compareFolderBtn.addEventListener("click", compareFolders);
 
-  folderResults.addEventListener("click", async (e) => {
+  folderResults.addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-open-path]");
     if (!btn) return;
     const path = decodeURIComponent(btn.dataset.openPath);
-    await openFolderDiffModal(path);
+    openFolderCompareWindow(path);
   });
+}
+
+function openFolderCompareWindow(path) {
+  const item = state.folderFilesMap.get(path);
+  if (!item) return;
+
+  const payloadId = `folderComparePayload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const payload = {
+    leftText: item.leftText,
+    rightText: item.rightText,
+    sourcePath: path
+  };
+
+  try {
+    localStorage.setItem(payloadId, JSON.stringify(payload));
+  } catch (err) {
+    alert("비교 데이터를 저장할 수 없습니다. 브라우저 저장소가 비활성화되어 있거나 용량을 초과했을 수 있습니다.");
+    return;
+  }
+
+  const baseUrl = window.location.href.split("?")[0].split("#")[0];
+  window.open(`${baseUrl}?folderCompareId=${encodeURIComponent(payloadId)}`, "_blank");
+}
+
+function loadFolderComparePayloadIfPresent() {
+  const params = new URLSearchParams(window.location.search);
+  const payloadId = params.get("folderCompareId");
+  if (!payloadId) return;
+
+  let payload = null;
+  try {
+    const raw = localStorage.getItem(payloadId);
+    if (raw) {
+      payload = JSON.parse(raw);
+      localStorage.removeItem(payloadId);
+    }
+  } catch (err) {
+    console.warn("폴더 비교 payload 로드 실패", err);
+  }
+
+  if (!payload) return;
+
+  if (state.leftModel && state.rightModel) {
+    state.leftModel.setValue(normalizeNewlines(payload.leftText || ""));
+    state.rightModel.setValue(normalizeNewlines(payload.rightText || ""));
+    const tabBtn = document.querySelector(".tab-button[data-tab='single']");
+    if (tabBtn) tabBtn.click();
+    refreshSingleDiffState();
+  }
+
+  const cleanUrl = window.location.href.split("?")[0];
+  window.history.replaceState({}, "", cleanUrl);
 }
 
 function folderSelectionInfo(fileList) {
@@ -986,7 +1040,7 @@ function renderFolderFileCard(item) {
         }
 
         <button class="action-btn" data-open-path="${encodeURIComponent(path)}">
-          상세 diff 열기
+          새 창에서 비교
         </button>
       </div>
     </div>
