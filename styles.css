@@ -380,6 +380,23 @@ textarea {
   display: none !important;
 }
 
+.modal-overlay.hidden {
+  display: block !important;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.offscreen-host {
+  position: absolute;
+  top: -9999px;
+  left: -9999px;
+  width: 1200px;
+  height: 720px;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .ai-result-wrap {
   width: 100%;
   display: flex;
