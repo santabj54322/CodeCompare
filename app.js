@@ -24,6 +24,7 @@ const state = {
   folderRightModel: null,
   folderModalDiffs: [],
   folderModalIndex: -1,
+  folderModalOpenVersion: 0,
   folderModalLeftDecorations: [],
   folderModalRightDecorations: []
 };
@@ -1052,14 +1053,43 @@ async function ensureFolderDiffEditor() {
   });
 }
 
+function resetFolderDiffViewerState() {
+  state.folderModalDiffs = [];
+  state.folderModalIndex = -1;
+
+  if (!state.folderDiffEditor) return;
+
+  const leftEditor = state.folderDiffEditor.getOriginalEditor();
+  const rightEditor = state.folderDiffEditor.getModifiedEditor();
+
+  state.folderModalLeftDecorations = leftEditor.deltaDecorations(
+    state.folderModalLeftDecorations,
+    []
+  );
+  state.folderModalRightDecorations = rightEditor.deltaDecorations(
+    state.folderModalRightDecorations,
+    []
+  );
+
+  leftEditor.setPosition({ lineNumber: 1, column: 1 });
+  rightEditor.setPosition({ lineNumber: 1, column: 1 });
+
+  leftEditor.revealLineInCenter(1);
+  rightEditor.revealLineInCenter(1);
+}
+
 async function openFolderDiffModal(path) {
   const item = state.folderFilesMap.get(path);
   if (!item) return;
 
   await ensureFolderDiffEditor();
+  resetFolderDiffViewerState();
+
+  const version = ++state.folderModalOpenVersion;
 
   state.folderLeftModel.setValue(item.leftText);
   state.folderRightModel.setValue(item.rightText);
+
   state.folderModalDiffs = buildLineDiffBlocks(item.leftText, item.rightText);
   state.folderModalIndex = state.folderModalDiffs.length ? 0 : -1;
 
@@ -1070,13 +1100,18 @@ async function openFolderDiffModal(path) {
       : "차이 없음";
 
   document.getElementById("folderDiffModal").classList.remove("hidden");
+
   setTimeout(() => {
+    if (version !== state.folderModalOpenVersion) return;
+
     state.folderDiffEditor.layout();
     applyFolderModalDecorations();
-    if (state.folderModalIndex >= 0) revealFolderModalDiff(state.folderModalIndex);
+
+    if (state.folderModalIndex >= 0) {
+      revealFolderModalDiff(state.folderModalIndex);
+    }
   }, 0);
 }
-
 function closeFolderDiffModal() {
   document.getElementById("folderDiffModal").classList.add("hidden");
 }
