@@ -362,19 +362,68 @@ function revealSingleDiff(index, focus = true) {
   revealRangeInEditor(state.rightEditor, state.rightModel, diff.rightStart, diff.rightEnd, focus);
 }
 
-function revealRangeInEditor(editor, model, startLine, endLine, focus) {
-  const lineCount = model.getLineCount();
-  if (!lineCount) return;
+function getSafeLineNumber(model, requestedLine, fallback = 1) {
+  const lineCount = Math.max(1, model?.getLineCount?.() ?? 1);
 
-  let targetLine;
-  if (endLine >= startLine && startLine >= 1) {
-    targetLine = startLine;
-  } else {
-    targetLine = Math.max(1, Math.min(startLine || 1, lineCount));
+  const raw = Number(requestedLine);
+  const base = Number.isFinite(raw) ? Math.trunc(raw) : fallback;
+  const safeBase = Number.isFinite(base) ? Math.trunc(base) : 1;
+
+  return Math.max(1, Math.min(safeBase, lineCount));
+}
+
+function getSafeAnchorLine(model, startLine, endLine) {
+  const lineCount = Math.max(1, model?.getLineCount?.() ?? 1);
+
+  // 일반 범위 diff
+  if (Number.isFinite(startLine) && Number.isFinite(endLine) && endLine >= startLine) {
+    return getSafeLineNumber(model, startLine, 1);
   }
 
-  editor.revealLineInCenter(targetLine);
-  if (focus) editor.setPosition({ lineNumber: targetLine, column: 1 });
+  // 삽입-only diff
+  // 예: startLine=11, endLine=10, 실제 파일 10줄 => anchor는 10으로 보정
+  const rawStart = Number(startLine);
+  if (Number.isFinite(rawStart)) {
+    return getSafeLineNumber(model, Math.min(rawStart, lineCount), 1);
+  }
+
+  return 1;
+}
+
+function revealRangeInEditor(editor, model, startLine, endLine, focus) {
+  if (!editor || !model) return;
+
+  const hasNormalRange =
+    Number.isFinite(startLine) &&
+    Number.isFinite(endLine) &&
+    endLine >= startLine;
+
+  if (hasNormalRange) {
+    const safeStart = getSafeLineNumber(model, startLine, 1);
+    const safeEnd = getSafeLineNumber(model, endLine, safeStart);
+
+    editor.revealLinesInCenter(safeStart, safeEnd);
+
+    if (focus) {
+      editor.setPosition({
+        lineNumber: safeStart,
+        column: 1
+      });
+    }
+    return;
+  }
+
+  // 삽입-only diff
+  const anchorLine = getSafeAnchorLine(model, startLine, endLine);
+
+  editor.revealLineInCenter(anchorLine);
+
+  if (focus) {
+    editor.setPosition({
+      lineNumber: anchorLine,
+      column: 1
+    });
+  }
 }
 
 function syncActiveDiffFromEditor(side, lineNumber) {
@@ -451,17 +500,34 @@ function applySingleActiveDecorations() {
 }
 
 function createHighlightRange(model, startLine, endLine, monaco) {
-  const lineCount = model.getLineCount();
-  if (!lineCount) return null;
+  if (!model || !monaco) return null;
 
-  if (endLine >= startLine && startLine >= 1) {
-    const safeStart = Math.max(1, Math.min(startLine, lineCount));
-    const safeEnd = Math.max(1, Math.min(endLine, lineCount));
-    return new monaco.Range(safeStart, 1, safeEnd, model.getLineMaxColumn(safeEnd));
+  const hasNormalRange =
+    Number.isFinite(startLine) &&
+    Number.isFinite(endLine) &&
+    endLine >= startLine;
+
+  if (hasNormalRange) {
+    const safeStart = getSafeLineNumber(model, startLine, 1);
+    const safeEnd = getSafeLineNumber(model, endLine, safeStart);
+
+    return new monaco.Range(
+      safeStart,
+      1,
+      safeEnd,
+      model.getLineMaxColumn(safeEnd)
+    );
   }
 
-  const anchor = Math.max(1, Math.min(startLine || 1, lineCount));
-  return new monaco.Range(anchor, 1, anchor, model.getLineMaxColumn(anchor));
+  // 삽입-only diff는 실제 존재하는 anchor 줄에 1줄 강조
+  const anchorLine = getSafeAnchorLine(model, startLine, endLine);
+
+  return new monaco.Range(
+    anchorLine,
+    1,
+    anchorLine,
+    model.getLineMaxColumn(anchorLine)
+  );
 }
 
 function applyCurrentSingleDiff(mode) {
