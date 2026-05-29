@@ -1,3 +1,5 @@
+const EDITOR_SIDE_CHANGE_EFFECT_MS = 950;
+
 const state = {
   monaco: null,
 
@@ -7,6 +9,8 @@ const state = {
   rightModel: null,
   leftEditor: null,
   rightEditor: null,
+  leftLanguage: "python",
+  rightLanguage: "python",
   singleDiffs: [],
   activeSingleDiffIndex: -1,
   leftDecorationIds: [],
@@ -14,6 +18,9 @@ const state = {
   aiMergeResult: null,
   aiResultModel: null,
   aiResultEditor: null,
+  suppressSingleCursorSync: false,
+  deferSingleReveal: false,
+  keepSingleNoSelection: false,
 
   // 폴더 비교
   folderFilesMap: new Map(),
@@ -173,10 +180,12 @@ async function initMonaco() {
   state.rightModel.onDidChangeContent(debouncedRefresh);
 
   state.leftEditor.onDidChangeCursorPosition((e) => {
+    if (state.suppressSingleCursorSync) return;
     syncActiveDiffFromEditor("left", e.position.lineNumber);
   });
 
   state.rightEditor.onDidChangeCursorPosition((e) => {
+    if (state.suppressSingleCursorSync) return;
     syncActiveDiffFromEditor("right", e.position.lineNumber);
   });
 
@@ -190,20 +199,39 @@ function bindSingleCompareUI() {
   document.getElementById("leftFileInput").addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    state.leftModel.setValue(normalizeNewlines(await file.text()));
+    setSingleSideContent("left", await file.text(), detectLanguageFromFileName(file.name), "load-left-file");
   });
 
   document.getElementById("rightFileInput").addEventListener("change", async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    state.rightModel.setValue(normalizeNewlines(await file.text()));
+    setSingleSideContent("right", await file.text(), detectLanguageFromFileName(file.name), "load-right-file");
+  });
+
+  document.getElementById("undoAllBtn").addEventListener("click", () => {
+    [state.leftEditor, state.rightEditor].forEach((editor) => triggerEditorUndo(editor));
+  });
+
+  document.getElementById("redoAllBtn").addEventListener("click", () => {
+    [state.leftEditor, state.rightEditor].forEach((editor) => triggerEditorRedo(editor));
   });
 
   document.getElementById("swapInputsBtn").addEventListener("click", () => {
     const left = state.leftModel.getValue();
     const right = state.rightModel.getValue();
-    state.leftModel.setValue(right);
-    state.rightModel.setValue(left);
+    const leftLang = state.leftLanguage;
+    const rightLang = state.rightLanguage;
+
+    state.keepSingleNoSelection = false;
+    state.suppressSingleCursorSync = true;
+
+    applySingleModelLanguage("left", rightLang);
+    applySingleModelLanguage("right", leftLang);
+
+    replaceEntireModelText(state.leftEditor, state.leftModel, right, "swap-left");
+    replaceEntireModelText(state.rightEditor, state.rightModel, left, "swap-right");
+
+    state.suppressSingleCursorSync = false;
     refreshSingleDiffState();
   });
 
@@ -219,12 +247,12 @@ function bindSingleCompareUI() {
     moveSingleDiff(1);
   });
 
-  document.getElementById("applyRightToLeftBtn").addEventListener("click", () => {
-    applyCurrentSingleDiff("left-from-right");
+  document.getElementById("applyRightToLeftBtn").addEventListener("click", async () => {
+    await applyCurrentSingleDiff("left-from-right");
   });
 
-  document.getElementById("applyLeftToRightBtn").addEventListener("click", () => {
-    applyCurrentSingleDiff("right-from-left");
+  document.getElementById("applyLeftToRightBtn").addEventListener("click", async () => {
+    await applyCurrentSingleDiff("right-from-left");
   });
 
   document.getElementById("aiMergeAllBtn").addEventListener("click", async () => {
@@ -248,7 +276,7 @@ function bindSingleCompareUI() {
 /* ------------------------------
    단일 비교 로직
 ------------------------------ */
-function refreshSingleDiffState() {
+function refreshSingleDiffState(options = {}) {
   if (!state.leftModel || !state.rightModel) return;
 
   const left = state.leftModel.getValue();
@@ -256,13 +284,32 @@ function refreshSingleDiffState() {
   state.singleDiffs = buildLineDiffBlocks(left, right);
 
   const meta = document.getElementById("singleCompareMeta");
+  const preferredActiveIndex = options.preferredActiveIndex;
+  const allowNoActive = options.allowNoActive ?? state.keepSingleNoSelection;
+  const skipReveal = options.skipReveal ?? state.deferSingleReveal;
+
   if (!state.singleDiffs.length) {
     meta.textContent = "차이 없음";
     state.activeSingleDiffIndex = -1;
+    state.keepSingleNoSelection = false;
   } else {
-    if (state.activeSingleDiffIndex < 0 || state.activeSingleDiffIndex >= state.singleDiffs.length) {
-      state.activeSingleDiffIndex = 0;
+    let nextActive = state.activeSingleDiffIndex;
+
+    if (Number.isInteger(preferredActiveIndex)) {
+      if (preferredActiveIndex >= 0) {
+        nextActive = Math.max(0, Math.min(preferredActiveIndex, state.singleDiffs.length - 1));
+      } else if (allowNoActive) {
+        nextActive = -1;
+      } else {
+        nextActive = 0;
+      }
+    } else if (allowNoActive && nextActive < 0) {
+      nextActive = -1;
+    } else if (nextActive < 0 || nextActive >= state.singleDiffs.length) {
+      nextActive = 0;
     }
+
+    state.activeSingleDiffIndex = nextActive;
     meta.textContent = `줄/단어 diff 기반 비교: 차이 ${state.singleDiffs.length}개`;
   }
 
@@ -271,7 +318,7 @@ function refreshSingleDiffState() {
   applySingleActiveDecorations();
   updateCurrentChangeHint();
 
-  if (state.activeSingleDiffIndex >= 0) {
+  if (!skipReveal && state.activeSingleDiffIndex >= 0) {
     revealSingleDiff(state.activeSingleDiffIndex, false);
   }
 }
@@ -309,13 +356,14 @@ function updateSingleToolbar() {
 
   const total = state.singleDiffs.length;
   const hasDiff = total > 0;
-  const current = hasDiff ? state.activeSingleDiffIndex + 1 : 0;
+  const hasActive = hasDiff && state.activeSingleDiffIndex >= 0;
+  const current = hasActive ? state.activeSingleDiffIndex + 1 : 0;
 
   countText.textContent = `${current} of ${total}`;
   prevBtn.disabled = !hasDiff;
   nextBtn.disabled = !hasDiff;
-  applyRTL.disabled = !hasDiff;
-  applyLTR.disabled = !hasDiff;
+  applyRTL.disabled = !hasActive;
+  applyLTR.disabled = !hasActive;
   aiBtn.disabled = false;
 }
 
@@ -331,8 +379,15 @@ function updateCurrentChangeHint() {
 
 function moveSingleDiff(delta) {
   if (!state.singleDiffs.length) return;
+  state.keepSingleNoSelection = false;
+
   const total = state.singleDiffs.length;
   let next = state.activeSingleDiffIndex + delta;
+
+  if (state.activeSingleDiffIndex < 0) {
+    next = delta >= 0 ? 0 : total - 1;
+  }
+
   if (next < 0) next = total - 1;
   if (next >= total) next = 0;
   setActiveSingleDiff(next, true);
@@ -341,6 +396,7 @@ function moveSingleDiff(delta) {
 function setActiveSingleDiff(index, reveal = true) {
   if (!state.singleDiffs.length) {
     state.activeSingleDiffIndex = -1;
+    state.keepSingleNoSelection = false;
     updateSingleToolbar();
     renderSingleChangeList();
     applySingleActiveDecorations();
@@ -348,6 +404,7 @@ function setActiveSingleDiff(index, reveal = true) {
     return;
   }
 
+  state.keepSingleNoSelection = false;
   const safe = Math.max(0, Math.min(index, state.singleDiffs.length - 1));
   state.activeSingleDiffIndex = safe;
   updateSingleToolbar();
@@ -379,13 +436,10 @@ function getSafeLineNumber(model, requestedLine, fallback = 1) {
 function getSafeAnchorLine(model, startLine, endLine) {
   const lineCount = Math.max(1, model?.getLineCount?.() ?? 1);
 
-  // 일반 범위 diff
   if (Number.isFinite(startLine) && Number.isFinite(endLine) && endLine >= startLine) {
     return getSafeLineNumber(model, startLine, 1);
   }
 
-  // 삽입-only diff
-  // 예: startLine=11, endLine=10, 실제 파일 10줄 => anchor는 10으로 보정
   const rawStart = Number(startLine);
   if (Number.isFinite(rawStart)) {
     return getSafeLineNumber(model, Math.min(rawStart, lineCount), 1);
@@ -417,7 +471,6 @@ function revealRangeInEditor(editor, model, startLine, endLine, focus) {
     return;
   }
 
-  // 삽입-only diff
   const anchorLine = getSafeAnchorLine(model, startLine, endLine);
 
   editor.revealLineInCenter(anchorLine);
@@ -434,6 +487,7 @@ function syncActiveDiffFromEditor(side, lineNumber) {
   if (!state.singleDiffs.length) return;
   const index = findNearestDiffIndex(state.singleDiffs, side, lineNumber);
   if (index !== state.activeSingleDiffIndex) {
+    state.keepSingleNoSelection = false;
     setActiveSingleDiff(index, false);
   }
 }
@@ -523,7 +577,6 @@ function createHighlightRange(model, startLine, endLine, monaco) {
     );
   }
 
-  // 삽입-only diff는 실제 존재하는 anchor 줄에 1줄 강조
   const anchorLine = getSafeAnchorLine(model, startLine, endLine);
 
   return new monaco.Range(
@@ -534,29 +587,52 @@ function createHighlightRange(model, startLine, endLine, monaco) {
   );
 }
 
-function applyCurrentSingleDiff(mode) {
+async function applyCurrentSingleDiff(mode) {
   const diff = state.singleDiffs[state.activeSingleDiffIndex];
   if (!diff) return;
 
-  if (mode === "left-from-right") {
-    const updated = replaceLineRange(
-      state.leftModel.getValue(),
-      diff.leftStart,
-      diff.leftEnd,
-      diff.rightText || ""
-    );
-    state.leftModel.setValue(updated);
-  } else {
-    const updated = replaceLineRange(
-      state.rightModel.getValue(),
-      diff.rightStart,
-      diff.rightEnd,
-      diff.leftText || ""
-    );
-    state.rightModel.setValue(updated);
+  const currentIndex = state.activeSingleDiffIndex;
+
+  const nextLeftText =
+    mode === "left-from-right"
+      ? replaceLineRange(state.leftModel.getValue(), diff.leftStart, diff.leftEnd, diff.rightText || "")
+      : state.leftModel.getValue();
+
+  const nextRightText =
+    mode === "right-from-left"
+      ? replaceLineRange(state.rightModel.getValue(), diff.rightStart, diff.rightEnd, diff.leftText || "")
+      : state.rightModel.getValue();
+
+  const predictedDiffs = buildLineDiffBlocks(nextLeftText, nextRightText);
+  const nextDiffIndex = predictedDiffs.length > currentIndex ? currentIndex : -1;
+  const changedSide = mode === "left-from-right" ? "left" : "right";
+
+  state.keepSingleNoSelection = nextDiffIndex === -1;
+  state.suppressSingleCursorSync = true;
+  state.deferSingleReveal = true;
+
+  try {
+    if (mode === "left-from-right") {
+      replaceEntireModelText(state.leftEditor, state.leftModel, nextLeftText, "apply-right-to-left");
+    } else {
+      replaceEntireModelText(state.rightEditor, state.rightModel, nextRightText, "apply-left-to-right");
+    }
+
+    refreshSingleDiffState({
+      skipReveal: true,
+      preferredActiveIndex: nextDiffIndex,
+      allowNoActive: nextDiffIndex === -1
+    });
+
+    await playSingleSideChangeEffect(changedSide);
+  } finally {
+    state.deferSingleReveal = false;
+    state.suppressSingleCursorSync = false;
   }
 
-  refreshSingleDiffState();
+  if (state.activeSingleDiffIndex >= 0) {
+    revealSingleDiff(state.activeSingleDiffIndex, true);
+  }
 }
 
 /* ------------------------------
@@ -571,6 +647,7 @@ async function runAIWholeMerge() {
 
   const leftCode = state.leftModel.getValue();
   const rightCode = state.rightModel.getValue();
+  const mergeKind = inferWholeMergeKind();
 
   if (!apiKey) {
     alert("OpenAI API Key를 입력하세요.");
@@ -591,8 +668,8 @@ async function runAIWholeMerge() {
     emptyText.textContent = "AI 전체 융합 중...";
   }
 
-  const systemPrompt = buildWholeMergeSystemPrompt();
-  const userPrompt = buildWholeMergeUserPrompt(leftCode, rightCode, extraInstruction);
+  const systemPrompt = buildWholeMergeSystemPrompt(mergeKind);
+  const userPrompt = buildWholeMergeUserPrompt(leftCode, rightCode, extraInstruction, mergeKind);
 
   try {
     const merged = await callOpenAIResponsesAPI({
@@ -604,7 +681,8 @@ async function runAIWholeMerge() {
     });
 
     state.aiMergeResult = {
-      content: stripCodeFence(merged).trim()
+      content: stripCodeFence(merged).trim(),
+      kind: mergeKind
     };
 
     renderAIMergePanel();
@@ -620,41 +698,99 @@ async function runAIWholeMerge() {
   }
 }
 
-function buildWholeMergeSystemPrompt() {
+function inferWholeMergeKind() {
+  const langs = [state.leftLanguage, state.rightLanguage].filter(Boolean);
+
+  if (langs.length && langs.every((x) => x === "json")) return "json";
+  if (langs.length && langs.every((x) => x === "python")) return "python";
+  return "code";
+}
+
+function buildWholeMergeSystemPrompt(kind) {
+  if (kind === "json") {
+    return [
+      "You are a meticulous JSON merge engine.",
+      "You will receive two full JSON files.",
+      "Your task is to produce one final merged full JSON file.",
+      "Return ONLY the final merged JSON text.",
+      "Do NOT return explanations.",
+      "Do NOT return markdown fences.",
+      "Do NOT return a patch or diff.",
+      "Do NOT return partial snippets.",
+      "Do NOT omit unchanged sections.",
+      "The output must be valid complete JSON.",
+      "Preserve useful keys, nested objects, arrays, and values as appropriate.",
+      "When both sides contain useful data, integrate both into one coherent final JSON document."
+    ].join(" ");
+  }
+
+  if (kind === "python") {
+    return [
+      "You are a meticulous Python file merge engine.",
+      "You will receive two full Python files.",
+      "Your task is to produce one final merged full Python file.",
+      "Return ONLY the final merged Python code.",
+      "Do NOT return explanations.",
+      "Do NOT return markdown fences.",
+      "Do NOT return a patch or diff.",
+      "Do NOT return partial snippets.",
+      "Do NOT omit unchanged sections.",
+      "The output must be a complete standalone Python file from the first line to the last line.",
+      "Preserve valid Python syntax, indentation, imports, globals, classes, functions, comments, and executable behavior as appropriate.",
+      "When both sides contain useful logic, integrate both into one coherent final file rather than choosing a tiny subset."
+    ].join(" ");
+  }
+
   return [
-    "You are a meticulous Python file merge engine.",
-    "You will receive two full Python files.",
-    "Your task is to produce one final merged full Python file.",
-    "Return ONLY the final merged Python code.",
+    "You are a meticulous file merge engine.",
+    "You will receive two full code or data files.",
+    "Your task is to produce one final merged full file.",
+    "Return ONLY the final merged file content.",
     "Do NOT return explanations.",
     "Do NOT return markdown fences.",
     "Do NOT return a patch or diff.",
     "Do NOT return partial snippets.",
     "Do NOT omit unchanged sections.",
-    "The output must be a complete standalone Python file from the first line to the last line.",
-    "Preserve valid Python syntax, indentation, imports, globals, classes, functions, comments, and executable behavior as appropriate.",
-    "When both sides contain useful logic, integrate both into one coherent final file rather than choosing a tiny subset."
+    "The output must be a complete standalone final file from the first line to the last line."
   ].join(" ");
 }
 
-function buildWholeMergeUserPrompt(leftCode, rightCode, extraInstruction) {
+function buildWholeMergeUserPrompt(leftCode, rightCode, extraInstruction, kind) {
+  const fileLabel =
+    kind === "json"
+      ? "JSON 전체 파일"
+      : kind === "python"
+        ? "Python 전체 파일"
+        : "전체 파일";
+
+  const extraRules =
+    kind === "json"
+      ? [
+          "6. JSON이면 반드시 유효한 JSON 문서여야 한다.",
+          "7. 양쪽에 각각 유용한 키/구조/값이 있으면 가능한 한 통합하라.",
+          "8. 한쪽에만 있는 유용한 필드도 충돌하지 않으면 유지하라."
+        ].join("\n")
+      : [
+          "6. 양쪽 코드에 각각 유용한 로직이 있으면 가능한 한 통합하라.",
+          "7. 한쪽에만 있는 기능도 충돌하지 않는다면 유지하라.",
+          "8. 결과는 바로 파일 전체를 덮어쓸 수 있는 완성 코드여야 한다."
+        ].join("\n");
+
   return `
-다음 두 개의 Python 전체 파일을 하나의 최종 Python 전체 파일로 융합하라.
+다음 두 개의 ${fileLabel}을 하나의 최종 ${fileLabel}로 융합하라.
 
 매우 중요:
-1. 응답은 오직 최종 Python 코드 전체만 반환하라.
+1. 응답은 오직 최종 파일 내용 전체만 반환하라.
 2. 설명, 요약, 마크다운 코드펜스(\`\`\`)를 절대 넣지 마라.
 3. 일부 함수만 반환하거나 일부 변경 부분만 반환하면 안 된다.
 4. 첫 줄부터 마지막 줄까지, 완성된 "전체 파일"을 반환하라.
-5. import, 상수, 전역 변수, 클래스, 함수, 주석, 보조 함수 등 파일 구성 요소를 빠뜨리지 마라.
-6. 양쪽 코드에 각각 유용한 로직이 있으면 가능한 한 통합하라.
-7. 한쪽에만 있는 기능도 충돌하지 않는다면 유지하라.
-8. 결과는 바로 파일 전체를 덮어쓸 수 있는 완성 코드여야 한다.
+5. 파일 구성 요소를 빠뜨리지 마라.
+${extraRules}
 
-[왼쪽 전체 코드]
+[왼쪽 전체 내용]
 ${leftCode || "(비어 있음)"}
 
-[오른쪽 전체 코드]
+[오른쪽 전체 내용]
 ${rightCode || "(비어 있음)"}
 
 [추가 지시]
@@ -664,7 +800,7 @@ ${extraInstruction || "(없음)"}
 - 전체 파일을 반환하라.
 - 일부 조각만 반환하지 마라.
 - diff 형식으로 반환하지 마라.
-- 반드시 완성된 최종 Python 전체 코드만 출력하라.
+- 반드시 완성된 최종 파일 전체만 출력하라.
 `.trim();
 }
 
@@ -805,6 +941,14 @@ function renderAIMergePanel() {
 
   ensureAIResultEditor();
   if (state.aiResultModel) {
+    const lang =
+      state.aiMergeResult.kind === "json"
+        ? "json"
+        : state.aiMergeResult.kind === "python"
+          ? "python"
+          : "plaintext";
+
+    setModelLanguage(state.aiResultModel, lang);
     state.aiResultModel.setValue(state.aiMergeResult.content);
   }
   if (state.aiResultEditor) {
@@ -817,11 +961,19 @@ function applyAIMergedCodeToSide(target) {
   if (!result || !state.aiResultEditor) return;
 
   const merged = state.aiResultEditor.getValue();
+  const lang =
+    result.kind === "json"
+      ? "json"
+      : result.kind === "python"
+        ? "python"
+        : (target === "left" ? state.leftLanguage : state.rightLanguage);
 
   if (target === "left") {
-    state.leftModel.setValue(merged);
+    applySingleModelLanguage("left", lang);
+    replaceEntireModelText(state.leftEditor, state.leftModel, merged, "apply-ai-left");
   } else {
-    state.rightModel.setValue(merged);
+    applySingleModelLanguage("right", lang);
+    replaceEntireModelText(state.rightEditor, state.rightModel, merged, "apply-ai-right");
   }
 
   refreshSingleDiffState();
@@ -860,11 +1012,14 @@ function openFolderCompareWindow(path) {
   const item = state.folderFilesMap.get(path);
   if (!item) return;
 
+  const language = detectLanguageFromFileName(path);
   const payloadId = `folderComparePayload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const payload = {
     leftText: item.leftText,
     rightText: item.rightText,
-    sourcePath: path
+    sourcePath: path,
+    leftLanguage: language,
+    rightLanguage: language
   };
 
   try {
@@ -897,8 +1052,16 @@ function loadFolderComparePayloadIfPresent() {
   if (!payload) return;
 
   if (state.leftModel && state.rightModel) {
-    state.leftModel.setValue(normalizeNewlines(payload.leftText || ""));
-    state.rightModel.setValue(normalizeNewlines(payload.rightText || ""));
+    const inferredLang = detectLanguageFromFileName(payload.sourcePath || "");
+    const leftLang = payload.leftLanguage || inferredLang || "plaintext";
+    const rightLang = payload.rightLanguage || inferredLang || "plaintext";
+
+    applySingleModelLanguage("left", leftLang);
+    applySingleModelLanguage("right", rightLang);
+
+    replaceEntireModelText(state.leftEditor, state.leftModel, normalizeNewlines(payload.leftText || ""), "load-folder-left");
+    replaceEntireModelText(state.rightEditor, state.rightModel, normalizeNewlines(payload.rightText || ""), "load-folder-right");
+
     const tabBtn = document.querySelector(".tab-button[data-tab='single']");
     if (tabBtn) tabBtn.click();
     refreshSingleDiffState();
@@ -911,9 +1074,13 @@ function loadFolderComparePayloadIfPresent() {
 function folderSelectionInfo(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return "선택된 폴더 없음";
+
   const pyCount = files.filter((f) => f.name.toLowerCase().endsWith(".py")).length;
+  const jsonCount = files.filter((f) => f.name.toLowerCase().endsWith(".json")).length;
+  const compareCount = files.filter((f) => isComparableCodeFileName(f.name)).length;
   const first = files[0]?.webkitRelativePath?.split("/")[0] || "폴더";
-  return `${first} / 전체 ${files.length}개 파일 / Python ${pyCount}개`;
+
+  return `${first} / 전체 ${files.length}개 파일 / 비교 대상 ${compareCount}개 (Python ${pyCount} / JSON ${jsonCount})`;
 }
 
 async function compareFolders() {
@@ -924,11 +1091,11 @@ async function compareFolders() {
   const folderResults = document.getElementById("folderResults");
   const folderMeta = document.getElementById("folderCompareMeta");
 
-  const leftFiles = Array.from(leftInput.files || []).filter((f) => f.name.toLowerCase().endsWith(".py"));
-  const rightFiles = Array.from(rightInput.files || []).filter((f) => f.name.toLowerCase().endsWith(".py"));
+  const leftFiles = Array.from(leftInput.files || []).filter((f) => isComparableCodeFileName(f.name));
+  const rightFiles = Array.from(rightInput.files || []).filter((f) => isComparableCodeFileName(f.name));
 
   if (!leftFiles.length && !rightFiles.length) {
-    alert("비교할 Python 폴더 파일이 없습니다.");
+    alert("비교할 Python/JSON 폴더 파일이 없습니다.");
     return;
   }
 
@@ -965,13 +1132,17 @@ async function compareFolders() {
         rightMap[path].text()
       ]);
 
-      const result = compareCode(leftText, rightText);
+      const normalizedLeft = normalizeNewlines(leftText);
+      const normalizedRight = normalizeNewlines(rightText);
+      const result = compareCode(normalizedLeft, normalizedRight, path);
+
       const item = {
         path,
-        leftText: normalizeNewlines(leftText),
-        rightText: normalizeNewlines(rightText),
+        leftText: normalizedLeft,
+        rightText: normalizedRight,
         result
       };
+
       state.folderFilesMap.set(path, item);
       return item;
     })
@@ -981,11 +1152,11 @@ async function compareFolders() {
   const diffCount = results.length - sameCount;
 
   folderMeta.textContent =
-    `공통 Python 파일 ${common.length}개 / 동일 ${sameCount}개 / 차이 ${diffCount}개 / 왼쪽 전용 ${leftOnly.length}개 / 오른쪽 전용 ${rightOnly.length}개`;
+    `공통 파일 ${common.length}개 / 동일 ${sameCount}개 / 차이 ${diffCount}개 / 왼쪽 전용 ${leftOnly.length}개 / 오른쪽 전용 ${rightOnly.length}개`;
 
   if (!results.length) {
     folderResults.className = "folder-results-grid empty-state";
-    folderResults.textContent = "공통 Python 파일이 없습니다.";
+    folderResults.textContent = "공통 Python/JSON 파일이 없습니다.";
     return;
   }
 
@@ -1017,7 +1188,11 @@ function renderFolderFileCard(item) {
   const { path, result } = item;
   const cls = result.identical ? "same" : "diff";
   const status = result.identical ? "동일" : "차이 있음";
+  const language = detectLanguageFromFileName(path);
   const modeLabel = result.mode === "chunk" ? "함수/클래스 블록" : "줄 단위";
+  const languageLabel =
+    language === "python" ? "Python" :
+    language === "json" ? "JSON" : "Text";
   const detailItems = summarizeDiffItems(result);
 
   return `
@@ -1029,6 +1204,7 @@ function renderFolderFileCard(item) {
 
       <div class="file-card-body">
         <div class="summary-tags">
+          <span class="summary-tag">형식: ${escapeHtml(languageLabel)}</span>
           <span class="summary-tag">비교 모드: ${escapeHtml(modeLabel)}</span>
           <span class="summary-tag">차이 블록: ${result.diffs.length}</span>
         </div>
@@ -1142,6 +1318,10 @@ async function openFolderDiffModal(path) {
   resetFolderDiffViewerState();
 
   const version = ++state.folderModalOpenVersion;
+  const language = detectLanguageFromFileName(path);
+
+  setModelLanguage(state.folderLeftModel, language);
+  setModelLanguage(state.folderRightModel, language);
 
   state.folderLeftModel.setValue(item.leftText);
   state.folderRightModel.setValue(item.rightText);
@@ -1168,6 +1348,7 @@ async function openFolderDiffModal(path) {
     }
   }, 0);
 }
+
 function closeFolderDiffModal() {
   document.getElementById("folderDiffModal").classList.add("hidden");
 }
@@ -1297,6 +1478,131 @@ function debounce(fn, delay = 150) {
   };
 }
 
+function normalizeEditorLanguage(language) {
+  if (language === "python" || language === "json") return language;
+  return "plaintext";
+}
+
+function detectLanguageFromFileName(fileName) {
+  const name = (fileName || "").toLowerCase().trim();
+  if (name.endsWith(".py")) return "python";
+  if (name.endsWith(".json")) return "json";
+  return "plaintext";
+}
+
+function isComparableCodeFileName(fileName) {
+  const name = (fileName || "").toLowerCase().trim();
+  return name.endsWith(".py") || name.endsWith(".json");
+}
+
+function setModelLanguage(model, language) {
+  if (!model || !state.monaco?.editor) return;
+  state.monaco.editor.setModelLanguage(model, normalizeEditorLanguage(language));
+}
+
+function applySingleModelLanguage(side, language) {
+  const normalized = normalizeEditorLanguage(language);
+  if (side === "left") {
+    state.leftLanguage = normalized;
+    setModelLanguage(state.leftModel, normalized);
+  } else {
+    state.rightLanguage = normalized;
+    setModelLanguage(state.rightModel, normalized);
+  }
+}
+
+function setSingleSideContent(side, text, language, source = "set-single-side") {
+  const normalizedText = normalizeNewlines(text || "");
+  applySingleModelLanguage(side, language);
+
+  state.keepSingleNoSelection = false;
+
+  if (side === "left") {
+    replaceEntireModelText(state.leftEditor, state.leftModel, normalizedText, source);
+  } else {
+    replaceEntireModelText(state.rightEditor, state.rightModel, normalizedText, source);
+  }
+
+  refreshSingleDiffState();
+}
+
+function getFullModelRange(model, monacoRef = state.monaco) {
+  const monaco = monacoRef || state.monaco;
+  if (!model || !monaco) return null;
+
+  const lastLine = Math.max(1, model.getLineCount());
+  const lastColumn = model.getLineMaxColumn(lastLine);
+
+  return new monaco.Range(1, 1, lastLine, lastColumn);
+}
+
+function replaceEntireModelText(editor, model, nextText, source = "replace-entire-model") {
+  const normalized = normalizeNewlines(nextText || "");
+  if (!model) return;
+
+  if (model.getValue() === normalized) return;
+
+  if (!editor || !state.monaco) {
+    model.setValue(normalized);
+    return;
+  }
+
+  const fullRange = getFullModelRange(model, state.monaco);
+  if (!fullRange) {
+    model.setValue(normalized);
+    return;
+  }
+
+  editor.pushUndoStop();
+  editor.executeEdits(source, [
+    {
+      range: fullRange,
+      text: normalized,
+      forceMoveMarkers: true
+    }
+  ]);
+  editor.pushUndoStop();
+}
+
+function triggerEditorUndo(editor) {
+  if (!editor) return;
+  editor.focus();
+  editor.trigger("toolbar", "undo", null);
+}
+
+function triggerEditorRedo(editor) {
+  if (!editor) return;
+  editor.focus();
+  editor.trigger("toolbar", "redo", null);
+}
+
+function playSingleSideChangeEffect(side) {
+  return new Promise((resolve) => {
+    const overlayId = side === "left" ? "leftChangedOverlay" : "rightChangedOverlay";
+    const el = document.getElementById(overlayId);
+
+    if (!el) {
+      resolve();
+      return;
+    }
+
+    if (el._changeTimer) {
+      clearTimeout(el._changeTimer);
+      el._changeTimer = null;
+    }
+
+    el.classList.remove("play");
+    void el.offsetWidth;
+    el.classList.add("play");
+
+    el._changeTimer = setTimeout(() => {
+      el.classList.remove("play");
+      el._changeTimer = null;
+      resolve();
+    }, EDITOR_SIDE_CHANGE_EFFECT_MS);
+  });
+}
+
 /* ------------------------------
    라인 diff
 ------------------------------ */
@@ -1392,19 +1698,23 @@ function buildLineDiffBlocks(leftText, rightText) {
 /* ------------------------------
    폴더 비교용 블록 비교
 ------------------------------ */
-function compareCode(left, right) {
-  const leftChunks = parsePythonChunks(left);
-  const rightChunks = parsePythonChunks(right);
-  const namedCount =
-    leftChunks.filter((c) => c.named).length + rightChunks.filter((c) => c.named).length;
+function compareCode(left, right, path = "") {
+  const language = detectLanguageFromFileName(path);
 
-  if (namedCount > 0) {
-    const diffs = compareByChunks(leftChunks, rightChunks);
-    return {
-      mode: "chunk",
-      diffs,
-      identical: diffs.length === 0
-    };
+  if (language === "python") {
+    const leftChunks = parsePythonChunks(left);
+    const rightChunks = parsePythonChunks(right);
+    const namedCount =
+      leftChunks.filter((c) => c.named).length + rightChunks.filter((c) => c.named).length;
+
+    if (namedCount > 0) {
+      const diffs = compareByChunks(leftChunks, rightChunks);
+      return {
+        mode: "chunk",
+        diffs,
+        identical: diffs.length === 0
+      };
+    }
   }
 
   const diffs = buildLineDiffBlocks(left, right);
