@@ -3,23 +3,24 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Python 코드 비교 / 병합 도구</title>
+  <title>Python / JSON 코드 비교 / 병합 도구</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="app-shell">
     <header class="page-header">
       <div>
-        <h1>Python 코드 비교 / 병합 도구</h1>
+        <h1>Python / JSON 코드 비교 / 병합 도구</h1>
         <p class="subtext">
-          VS Code 스타일의 에디터에서 Python 코드를 비교하고, 변경점 단위로 이동/적용하거나 전체 코드를 AI로 융합할 수 있습니다.
+          VS Code 스타일의 에디터에서 Python/JSON 코드를 비교하고, 변경점 단위로 이동/적용하거나 전체 코드를 AI로 융합할 수 있습니다.
         </p>
       </div>
       <div class="badge-row">
         <span class="badge">Monaco Editor</span>
-        <span class="badge">줄 번호 / 문법 강조</span>
+        <span class="badge">Python / JSON 문법 강조</span>
         <span class="badge">변경점 네비게이션</span>
         <span class="badge">양방향 적용</span>
+        <span class="badge">되돌리기 버튼</span>
         <span class="badge">AI 전체 융합</span>
       </div>
     </header>
@@ -38,12 +39,14 @@
             <div class="panel-actions">
               <label class="inline-file-picker">
                 <span>왼쪽 파일</span>
-                <input id="leftFileInput" type="file" accept=".py,.txt" />
+                <input id="leftFileInput" type="file" accept=".py,.json,.txt" />
               </label>
               <label class="inline-file-picker">
                 <span>오른쪽 파일</span>
-                <input id="rightFileInput" type="file" accept=".py,.txt" />
+                <input id="rightFileInput" type="file" accept=".py,.json,.txt" />
               </label>
+              <button id="undoAllBtn" class="secondary-btn">되돌리기</button>
+              <button id="redoAllBtn" class="secondary-btn">다시 실행</button>
               <button id="swapInputsBtn" class="secondary-btn">좌우 교체</button>
               <button id="refreshDiffBtn" class="primary-btn">비교 새로고침</button>
             </div>
@@ -53,6 +56,13 @@
 
           <div class="diff-editor-wrap">
             <div id="diffEditorContainer" class="monaco-host"></div>
+
+            <div id="leftChangedOverlay" class="editor-side-overlay left">
+              <div class="editor-side-overlay-box">바뀜</div>
+            </div>
+            <div id="rightChangedOverlay" class="editor-side-overlay right">
+              <div class="editor-side-overlay-box">바뀜</div>
+            </div>
           </div>
 
           <div class="merge-center-strip">
@@ -103,7 +113,7 @@
               <span>Reasoning mode</span>
               <select id="reasoningEffortSelect">
                 <option value="none">none</option>
-                <option value="low"selected>low</option>
+                <option value="low" selected>low</option>
                 <option value="medium">medium</option>
                 <option value="high">high</option>
               </select>
@@ -112,7 +122,7 @@
 
           <label class="block-label">
             <span>추가 병합 지시문</span>
-            <textarea id="mergeInstruction" rows="5" placeholder="예: 두 구현의 장점을 합치되, import/클래스/함수 등 파일 전체를 빠짐없이 유지하고, 예외 처리와 타입 안정성을 강화해 달라."></textarea>
+            <textarea id="mergeInstruction" rows="5" placeholder="예: 두 구현의 장점을 합치되, import/클래스/함수 등 파일 전체를 빠짐없이 유지하고, 예외 처리와 타입 안정성을 강화해 달라. JSON이면 구조를 보존하고 키 누락 없이 합쳐 달라."></textarea>
           </label>
 
           <p class="note">
@@ -139,6 +149,7 @@
           </div>
         </div>
       </section>
+
       <!-- 폴더 비교 -->
       <section id="tab-folder" class="tab-panel">
         <div class="panel">
@@ -166,7 +177,8 @@
           </div>
 
           <p class="note">
-            하위 폴더 포함 전체에서 <code>.py</code> 파일만 비교합니다. 대응 관계는 선택한 폴더 내부 상대 경로 기준입니다.
+            하위 폴더 포함 전체에서 <code>.py</code>, <code>.json</code> 파일만 비교합니다.
+            대응 관계는 선택한 폴더 내부 상대 경로 기준입니다.
           </p>
         </div>
 
