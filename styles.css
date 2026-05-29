@@ -227,6 +227,72 @@ button:disabled {
   height: 72vh;
 }
 
+.editor-side-overlay {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  width: calc(50% - 10px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 10;
+  opacity: 0;
+}
+
+.editor-side-overlay.left {
+  left: 10px;
+}
+
+.editor-side-overlay.right {
+  right: 10px;
+}
+
+.editor-side-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  background: rgba(107, 114, 128, 0.18);
+}
+
+.editor-side-overlay-box {
+  position: relative;
+  z-index: 1;
+  min-width: 180px;
+  padding: 20px 34px;
+  border-radius: 18px;
+  background: rgba(229, 231, 235, 0.82);
+  border: 1px solid rgba(107, 114, 128, 0.18);
+  color: rgba(55, 65, 81, 0.82);
+  font-size: clamp(40px, 5vw, 72px);
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  user-select: none;
+}
+
+.editor-side-overlay.play {
+  display: flex;
+  animation: changedFadeOut 950ms ease-out forwards;
+}
+
+@keyframes changedFadeOut {
+  0% {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  12% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.01);
+  }
+}
+
 .merge-center-strip {
   display: flex;
   justify-content: center;
@@ -643,5 +709,10 @@ textarea {
 
   .modal-editor {
     height: 66vh;
+  }
+
+  .editor-side-overlay {
+    top: 12px;
+    bottom: 12px;
   }
 }
